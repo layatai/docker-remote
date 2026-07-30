@@ -13,8 +13,10 @@ $ docker-remote compose up --remote dev@example.com
 
 ## Status
 
-This is an early MVP for macOS and Linux clients. It deliberately uses the
-remote Docker CLI over SSH instead of exposing an unauthenticated Docker socket.
+The CLI and forwarding agent support Windows, macOS, and Linux clients. A
+lightweight native Tauri tray is included for continuously supervising the
+agent and inspecting every forwarded port. The remote Docker CLI still runs
+over SSH; the Docker socket is never exposed over TCP.
 
 ## Requirements
 
@@ -22,6 +24,9 @@ Local:
 
 - Node.js 20 or newer
 - OpenSSH client
+
+The desktop tray additionally uses the operating system's native WebView and
+system-tray support. Linux packages require an AppIndicator-compatible desktop.
 
 Remote:
 
@@ -73,6 +78,42 @@ docker-remote compose up
 Run `docker-remote --help` for all wrapper options. Docker and Compose flags that
 are not prefixed with `--remote-` are passed through unchanged.
 
+### Agent and port inspector
+
+Persistent forwards are desired state managed by one background agent. The CLI
+starts that agent automatically; it is safe to run the start command more than
+once.
+
+```sh
+docker-remote agent start
+docker-remote agent status
+docker-remote ports
+docker-remote ports --json
+docker-remote agent stop       # desired sessions remain for the next start
+docker-remote agent clear      # remove every desired session
+```
+
+The agent keeps one foreground OpenSSH child per remote project. OpenSSH
+keepalives detect broken connections, and the agent relaunches failed tunnels
+with capped exponential backoff and jitter. Desired sessions survive agent and
+machine restarts in an atomic, user-private state file.
+
+### System tray
+
+The windowless desktop app provides a native tray menu on Windows, macOS, and
+Linux. It starts at login, relaunches the forwarding agent if it dies, refreshes
+every two seconds, and shows:
+
+- agent PID and health;
+- project, SSH target, and connection state;
+- every local-to-remote port mapping;
+- restart count and the most recent SSH error;
+- a per-project action to stop forwarding.
+
+For development, install the CLI with `npm link`, then build or run the tray
+from `desktop/src-tauri`. Set `DOCKER_REMOTE_BIN` when the CLI is not on the
+desktop session's `PATH`.
+
 ### Project synchronization
 
 Before each Compose command, the CLI:
@@ -96,10 +137,12 @@ For `compose up`, published TCP ports are read from
 They are never exposed on the client's public interfaces.
 
 - Attached `compose up`: the tunnel exists while Compose is attached.
-- Detached `compose up -d` or `compose up --wait`: the tunnel persists.
+- Detached `compose up -d` or `compose up --wait`: desired forwarding persists
+  and is continuously supervised.
 - `compose stop` and `compose down`: the project's persistent tunnel is closed.
 - `docker-remote tunnel status|stop`: inspect or close tunnels for the current
   project.
+- `docker-remote ports`: inspect all projects, ports, health, and restart state.
 
 Add a mapping manually for a raw Docker command:
 
@@ -110,7 +153,23 @@ docker-remote run -d -p 8080:80 nginx \
 ```
 
 If a local port is already occupied, SSH fails rather than silently binding a
-different address. Use `--remote-no-forward` to disable forwarding.
+different address. The error is retained for inspection while the agent retries
+with backoff. Use `--remote-no-forward` to disable forwarding.
+
+## Architecture and language choice
+
+The implementation intentionally uses two small control-plane components:
+
+- Node.js owns Docker-compatible argument handling, project archiving, Compose
+  discovery, and short-lived SSH command execution.
+- Rust/Tauri owns native tray and login integration.
+- OpenSSH owns encryption, authentication, keepalives, and the forwarding data
+  path.
+
+Rewriting the CLI in another language would not improve forwarding throughput:
+application bytes flow directly through OpenSSH, not through Node.js. Keeping
+the tested CLI and using Rust only for the long-lived native shell gives a
+smaller desktop footprint than Electron and avoids a high-risk full rewrite.
 
 ### SSH configuration
 
@@ -159,6 +218,9 @@ Docker command.
 - SSH destinations beginning with `-` or containing whitespace/control
   characters are rejected.
 - Automatic forwards bind only to `127.0.0.1`.
+- Agent state contains paths and SSH options but never key material; it is
+  written atomically below the current user's private state directory.
+- SSH subprocesses receive arguments directly without invoking a local shell.
 - The uploader only replaces its own generated directory below
   `~/.docker-remote/projects`.
 - Docker access on the remote host is equivalent to privileged host access;
@@ -173,8 +235,19 @@ npm run test:coverage
 ```
 
 The tests cover wrapper parsing, shell injection resistance, Compose argument
-handling, `.dockerignore` archiving, published-port parsing, and tunnel
-identity.
+handling, `.dockerignore` archiving, published-port parsing, atomic desired
+state, tunnel supervision, retry behavior, and tunnel identity. CI runs Node.js
+tests across Windows, macOS, and Linux and compiles the Rust tray on all three.
+
+Validate the tray separately:
+
+```sh
+cargo check --manifest-path desktop/src-tauri/Cargo.toml
+```
+
+Tagged `desktop-v*` builds create draft macOS, Windows, and Linux bundles
+through the release workflow. Configure normal Apple and Windows signing
+credentials before promoting those drafts for general distribution.
 
 ## Current limitations
 
@@ -184,7 +257,11 @@ identity.
 - Bind mounts that use absolute host paths refer to the remote host and are not
   uploaded.
 - UDP ports cannot be forwarded by SSH and are ignored.
-- Windows clients and Windows SSH hosts are not yet supported.
+- Windows SSH *clients* are supported; a Windows SSH *remote host* is not,
+  because remote project synchronization currently requires POSIX `sh` and
+  `tar`.
+- Desktop installers currently locate an existing `docker-remote` CLI beside
+  the tray binary, through `DOCKER_REMOTE_BIN`, or on `PATH`.
 
 ## License
 

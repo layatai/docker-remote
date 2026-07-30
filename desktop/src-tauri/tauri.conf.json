@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "docker-remote",
+  "version": "0.2.0",
+  "identifier": "io.github.layatai.docker-remote",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Supervise and inspect docker-remote port forwards",
+    "longDescription": "A lightweight system tray that keeps docker-remote's forwarding agent alive and displays every managed local port.",
+    "targets": "all"
+  }
+}

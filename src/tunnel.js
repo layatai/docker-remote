@@ -1,9 +1,10 @@
-import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 
-import { waitForChild, RemoteProcessError } from './ssh.js';
+import { StateStore, sessionId } from './state.js';
+import { ensureAgentRunning } from './supervisor.js';
 
 function stateDirectory() {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
@@ -20,61 +21,57 @@ export function formatForward(forward) {
 }
 
 export class TunnelManager {
-  constructor(client, key) {
+  constructor(client, key, {
+    store = new StateStore(),
+    ensureAgent = ensureAgentRunning,
+    label = key,
+    readyTimeoutMs = 12_000,
+  } = {}) {
     this.client = client;
+    this.key = key;
+    this.id = sessionId(client.target, key);
+    this.label = label;
+    this.store = store;
+    this.ensureAgent = ensureAgent;
+    this.readyTimeoutMs = readyTimeoutMs;
     this.socket = controlSocket(client.target, key);
   }
 
   exists() {
-    return fs.existsSync(this.socket);
+    return Boolean(this.store.read().sessions[this.id]?.desired);
   }
 
   async stop({ quiet = false } = {}) {
-    if (!this.exists()) return false;
-    const args = [
-      ...this.client.connectionArgs(),
-      '-S',
-      this.socket,
-      '-O',
-      'exit',
-      this.client.target,
-    ];
-    const child = this.client.spawn(this.client.sshCommand, args, {
-      stdio: quiet ? 'ignore' : ['ignore', 'inherit', 'inherit'],
-      env: process.env,
-    });
-    const result = await waitForChild(child);
-    try {
-      if (fs.existsSync(this.socket)) fs.unlinkSync(this.socket);
-    } catch {
-      // A stale control socket should not make cleanup fail.
-    }
-    return result.code === 0;
+    void quiet;
+    return this.store.removeSession(this.id);
   }
 
   async start(forwards) {
     if (forwards.length === 0) return;
-    fs.mkdirSync(path.dirname(this.socket), { recursive: true, mode: 0o700 });
-    await this.stop({ quiet: true });
-    const args = [
-      ...this.client.connectionArgs(),
-      '-M',
-      '-S',
-      this.socket,
-      '-f',
-      '-N',
-      '-o',
-      'ExitOnForwardFailure=yes',
-    ];
-    for (const forward of forwards) args.push('-L', formatForward(forward));
-    args.push(this.client.target);
-    const child = this.client.spawn(this.client.sshCommand, args, {
-      stdio: ['ignore', 'inherit', 'inherit'],
-      env: process.env,
+    await this.store.upsertSession({
+      id: this.id,
+      key: this.key,
+      label: this.label,
+      target: this.client.target,
+      connection: {
+        identity: this.client.identity,
+        sshOptions: [...this.client.sshOptions],
+        sshCommand: this.client.sshCommand,
+      },
+      forwards,
     });
-    const result = await waitForChild(child);
-    if (result.code !== 0) {
-      throw new RemoteProcessError(`SSH port forwarding failed with exit code ${result.code}`, result.code);
+    await this.ensureAgent({ store: this.store });
+
+    const deadline = Date.now() + this.readyTimeoutMs;
+    let lastRuntime;
+    while (Date.now() < deadline) {
+      const session = this.store.read().sessions[this.id];
+      if (!session) throw new Error('port-forwarding session was removed before it started');
+      lastRuntime = session.runtime;
+      if (lastRuntime?.status === 'active') return;
+      await delay(50);
     }
+    const details = lastRuntime?.lastError ? `: ${lastRuntime.lastError}` : '';
+    throw new Error(`timed out starting SSH port forwarding${details}`);
   }
 }

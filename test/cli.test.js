@@ -39,6 +39,13 @@ test('uses the environment as a remote fallback', () => {
   assert.equal(options.remote, 'env-host');
 });
 
+test('allows local agent and port inspection commands without an SSH target', () => {
+  assert.deepEqual(parseOptions(['agent', 'status'], {}).command, ['agent', 'status']);
+  assert.deepEqual(parseOptions(['ports', '--json'], {}).command, ['ports', '--json']);
+  assert.deepEqual(normalizeInvocation(['agent', 'status']), { kind: 'agent', args: ['status'] });
+  assert.deepEqual(normalizeInvocation(['ports']), { kind: 'ports', args: [] });
+});
+
 test('rejects targets that could become SSH options', () => {
   assert.throws(
     () => parseOptions(['ps', '--remote', '-oProxyCommand=bad'], {}),

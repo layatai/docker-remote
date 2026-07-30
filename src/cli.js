@@ -1,7 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 const valueFlags = new Set([
   '--remote',
@@ -135,7 +135,8 @@ export function parseOptions(argv, env = process.env) {
   }
 
   if (options.help || options.version) return options;
-  validateRemote(options.remote);
+  const localCommand = options.command[0] === 'agent' || options.command[0] === 'ports';
+  if (!localCommand) validateRemote(options.remote);
   if (options.noForward && options.forwards.length > 0) {
     throw new Error('--remote-no-forward cannot be combined with --remote-forward');
   }
@@ -156,6 +157,14 @@ export function normalizeInvocation(command) {
     args.shift();
     return { kind: 'tunnel', args };
   }
+  if (args[0] === 'agent') {
+    args.shift();
+    return { kind: 'agent', args };
+  }
+  if (args[0] === 'ports') {
+    args.shift();
+    return { kind: 'ports', args };
+  }
   return { kind: 'docker', args };
 }
 
@@ -168,6 +177,8 @@ Usage:
   docker-remote compose COMMAND [ARGS...] --remote USER@HOST
   docker-remote docker-compose COMMAND [ARGS...] --remote USER@HOST
   docker-remote tunnel (status|stop) --remote USER@HOST
+  docker-remote ports [--json]
+  docker-remote agent (start|status|stop|run|remove|clear)
 
 Examples:
   docker-remote ps --remote dev@example.com
@@ -175,6 +186,8 @@ Examples:
   docker-remote compose up -d --remote dev@example.com
   docker-remote run --rm alpine uname -a --remote dev@example.com
   docker-remote tunnel stop --remote dev@example.com
+  docker-remote ports
+  docker-remote agent status
 
 Options:
   --remote TARGET              SSH destination; may appear anywhere

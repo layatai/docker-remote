@@ -1,6 +1,6 @@
 {
   "name": "@layatai/docker-remote",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run Docker and Docker Compose on an SSH host with local port forwarding.",
   "type": "module",
   "bin": {
@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "check": "npm run lint && npm test",
-    "lint": "node --check bin/docker-remote.js && for file in src/*.js test/*.js; do node --check \"$file\"; done",
+    "lint": "node scripts/lint.js",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage"
   },

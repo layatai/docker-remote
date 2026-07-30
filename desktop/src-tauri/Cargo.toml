@@ -1,0 +1,26 @@
+[package]
+name = "docker-remote-tray"
+version = "0.2.0"
+description = "Native tray and process watchdog for docker-remote"
+authors = ["layatai"]
+license = "MIT"
+repository = "https://github.com/layatai/docker-remote"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
