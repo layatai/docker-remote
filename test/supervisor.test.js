@@ -98,12 +98,14 @@ test('starts, marks healthy, and restarts a failed tunnel', async () => {
       return child;
     },
   });
+  supervisor.leaseToken = 'agent-token';
 
   await supervisor.reconcile();
   assert.equal(children.length, 1);
   children[0].emit('spawn');
   await tick();
   assert.equal(store.read().sessions['session-1'].runtime.status, 'connecting');
+  assert.equal(store.read().sessions['session-1'].runtime.ownerToken, 'agent-token');
 
   now += 800;
   await supervisor.reconcile();
@@ -119,6 +121,83 @@ test('starts, marks healthy, and restarts a failed tunnel', async () => {
   now = Date.parse(failed.nextRetryAt);
   await supervisor.reconcile();
   assert.equal(children.length, 2);
+});
+
+test('reclaims a recently orphaned tunnel owned by the crashed agent', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'docker-remote-supervisor-'));
+  const now = Date.now();
+  const store = new StateStore({ directory, now: () => now });
+  await store.upsertSession(session());
+  await store.setRuntime('session-1', {
+    status: 'active',
+    pid: 444,
+    ownerToken: 'previous-agent-token',
+  });
+  const alive = new Set([444]);
+  const signals = [];
+  const supervisor = new TunnelSupervisor({
+    store,
+    now: () => now,
+    processAlive: (pid) => alive.has(pid),
+    killProcess: (pid, signal) => {
+      signals.push([pid, signal]);
+      alive.delete(pid);
+    },
+  });
+
+  await supervisor.reclaimOrphanedSessions({
+    pid: 111,
+    token: 'previous-agent-token',
+    heartbeatAt: new Date(now - 2_000).toISOString(),
+  });
+
+  assert.deepEqual(signals, [[444, 'SIGTERM']]);
+  assert.deepEqual(
+    store.read().sessions['session-1'].runtime,
+    {
+      status: 'pending',
+      pid: null,
+      ownerToken: null,
+      restartCount: 0,
+      lastError: null,
+      lastStartedAt: null,
+      lastHealthyAt: null,
+      nextRetryAt: null,
+    },
+  );
+});
+
+test('does not reclaim a tunnel without recent matching ownership', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'docker-remote-supervisor-'));
+  const now = Date.now();
+  const store = new StateStore({ directory, now: () => now });
+  await store.upsertSession(session());
+  await store.setRuntime('session-1', {
+    status: 'active',
+    pid: 444,
+    ownerToken: 'different-agent-token',
+  });
+  const signals = [];
+  const supervisor = new TunnelSupervisor({
+    store,
+    now: () => now,
+    processAlive: (pid) => pid === 444,
+    killProcess: (...args) => signals.push(args),
+  });
+
+  await supervisor.reclaimOrphanedSessions({
+    pid: 111,
+    token: 'previous-agent-token',
+    heartbeatAt: new Date(now - 2_000).toISOString(),
+  });
+  await supervisor.reclaimOrphanedSessions({
+    pid: 111,
+    token: 'different-agent-token',
+    heartbeatAt: new Date(now - 60_000).toISOString(),
+  });
+
+  assert.deepEqual(signals, []);
+  assert.equal(store.read().sessions['session-1'].runtime.pid, 444);
 });
 
 test('terminates a running tunnel when desired state is removed', async () => {

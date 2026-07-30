@@ -18,6 +18,7 @@
   "scripts": {
     "check": "npm run lint && npm test",
     "lint": "node scripts/lint.js",
+    "release:npm": "node scripts/publish-npm.js",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage"
   },

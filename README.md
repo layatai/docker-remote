@@ -245,6 +245,25 @@ Validate the tray separately:
 cargo check --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
+### Publish the CLI to npm
+
+Run the complete release validation and npm publish dry run:
+
+```sh
+npm run release:npm
+```
+
+Publishing requires a clean worktree, an authenticated npm account, and a
+version that does not already exist on the registry:
+
+```sh
+npm run release:npm -- --publish
+```
+
+Use `--tag next` for a prerelease distribution tag and `--provenance` when the
+publishing environment supports npm provenance. A dry run from a deliberately
+dirty development tree requires the explicit `--allow-dirty` flag.
+
 Tagged `desktop-v*` builds create draft macOS, Windows, and Linux bundles
 through the release workflow. Configure normal Apple and Windows signing
 credentials before promoting those drafts for general distribution.

@@ -3,12 +3,14 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { StateStore, sessionFingerprint } from './state.js';
+import { StateStore, isProcessAlive, sessionFingerprint } from './state.js';
 
 const RECONCILE_INTERVAL_MS = 500;
 const READY_AFTER_MS = 750;
 const HEALTHY_AFTER_MS = 30_000;
 const MAX_STDERR_BYTES = 8_192;
+const TAKEOVER_WINDOW_MS = 15_000;
+const TERMINATE_TIMEOUT_MS = 2_000;
 
 function iso(timestamp) {
   return new Date(timestamp).toISOString();
@@ -60,14 +62,69 @@ export class TunnelSupervisor {
     now = () => Date.now(),
     random = Math.random,
     logger = () => {},
+    processAlive = isProcessAlive,
+    killProcess = process.kill.bind(process),
   } = {}) {
     this.store = store;
     this.spawnProcess = spawnProcess;
     this.now = now;
     this.random = random;
     this.logger = logger;
+    this.processAlive = processAlive;
+    this.killProcess = killProcess;
     this.runners = new Map();
     this.stopping = false;
+    this.leaseToken = null;
+  }
+
+  async reclaimOrphanedSessions(previousAgent) {
+    const heartbeatAt = Date.parse(previousAgent?.heartbeatAt ?? '');
+    if (
+      !previousAgent?.token
+      || this.processAlive(previousAgent.pid)
+      || !Number.isFinite(heartbeatAt)
+      || this.now() - heartbeatAt > TAKEOVER_WINDOW_MS
+    ) {
+      return;
+    }
+
+    const sessions = Object.values(this.store.read().sessions);
+    for (const session of sessions) {
+      const pid = session.runtime?.pid;
+      if (
+        session.runtime?.ownerToken !== previousAgent.token
+        || !Number.isSafeInteger(pid)
+        || pid <= 0
+        || !this.processAlive(pid)
+      ) {
+        continue;
+      }
+
+      this.logger(`reclaiming orphaned tunnel ${session.id} (pid ${pid})`);
+      try {
+        this.killProcess(pid, 'SIGTERM');
+      } catch (error) {
+        if (error?.code !== 'ESRCH') throw error;
+      }
+      const deadline = this.now() + TERMINATE_TIMEOUT_MS;
+      while (this.now() < deadline && this.processAlive(pid)) {
+        await delay(50);
+      }
+      if (this.processAlive(pid)) {
+        try {
+          this.killProcess(pid, 'SIGKILL');
+        } catch (error) {
+          if (error?.code !== 'ESRCH') throw error;
+        }
+      }
+      await this.store.setRuntime(session.id, {
+        status: 'pending',
+        pid: null,
+        ownerToken: null,
+        lastError: null,
+        nextRetryAt: null,
+      });
+    }
   }
 
   async startSession(session) {
@@ -95,6 +152,7 @@ export class TunnelSupervisor {
       void this.store.setRuntime(session.id, {
         status: 'connecting',
         pid: child.pid ?? null,
+        ownerToken: this.leaseToken,
         lastError: null,
         lastStartedAt: iso(runner.startedAt),
         nextRetryAt: null,
@@ -127,6 +185,7 @@ export class TunnelSupervisor {
     await this.store.setRuntime(id, {
       status: 'reconnecting',
       pid: null,
+      ownerToken: null,
       restartCount,
       lastError: reason,
       nextRetryAt: iso(retryAt),
@@ -189,6 +248,7 @@ export class TunnelSupervisor {
       stopping.push(this.store.setRuntime(id, {
         status: 'stopped',
         pid: null,
+        ownerToken: null,
         nextRetryAt: null,
       }));
     }
@@ -197,27 +257,33 @@ export class TunnelSupervisor {
   }
 
   async run({ signal } = {}) {
+    const previousAgent = this.store.readAgent();
     const lease = this.store.acquireAgentLease();
     if (!lease) return false;
-    const startedAt = iso(this.now());
-    const writeHeartbeat = () => this.store.writeAgent({
-      pid: process.pid,
-      token: lease.token,
-      startedAt,
-      heartbeatAt: iso(this.now()),
-    });
-    writeHeartbeat();
-    const heartbeat = setInterval(writeHeartbeat, 2_000);
-    heartbeat.unref?.();
-    const stop = () => {
-      this.stopping = true;
-    };
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-    signal?.addEventListener('abort', stop, { once: true });
-    this.logger(`agent started (pid ${process.pid})`);
+    this.leaseToken = lease.token;
+    let heartbeat;
+    let stop;
 
     try {
+      await this.reclaimOrphanedSessions(previousAgent);
+      const startedAt = iso(this.now());
+      const writeHeartbeat = () => this.store.writeAgent({
+        pid: process.pid,
+        token: lease.token,
+        startedAt,
+        heartbeatAt: iso(this.now()),
+      });
+      writeHeartbeat();
+      heartbeat = setInterval(writeHeartbeat, 2_000);
+      heartbeat.unref?.();
+      stop = () => {
+        this.stopping = true;
+      };
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      signal?.addEventListener('abort', stop, { once: true });
+      this.logger(`agent started (pid ${process.pid})`);
+
       while (!this.stopping) {
         await this.reconcile();
         await delay(RECONCILE_INTERVAL_MS);
@@ -225,11 +291,14 @@ export class TunnelSupervisor {
       await this.shutdown();
       return true;
     } finally {
-      clearInterval(heartbeat);
-      process.removeListener('SIGINT', stop);
-      process.removeListener('SIGTERM', stop);
+      if (heartbeat) clearInterval(heartbeat);
+      if (stop) {
+        process.removeListener('SIGINT', stop);
+        process.removeListener('SIGTERM', stop);
+      }
       this.store.removeAgent(lease.token);
       this.store.releaseAgentLease(lease);
+      this.leaseToken = null;
       this.logger('agent stopped');
     }
   }

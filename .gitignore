@@ -2,3 +2,7 @@ node_modules/
 coverage/
 *.log
 .DS_Store
+.codegraph/
+.cursor/
+desktop/src-tauri/gen/
+desktop/src-tauri/target/
