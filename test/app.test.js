@@ -44,7 +44,7 @@ test('syncs a Compose project and executes with a stable project name', async ()
     },
   );
   assert.equal(code, 0);
-  assert.equal(syncedProject.localRoot, root);
+  assert.equal(syncedProject.localRoot, fs.realpathSync(root));
   assert.match(client.commands[0], /'docker' 'compose' '--project-name'/);
   assert.match(client.commands[0], /'ps'$/);
   assert.match(client.commands[0], /^cd "\$HOME\/\.docker-remote\/projects\//);

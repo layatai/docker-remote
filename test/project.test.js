@@ -13,7 +13,7 @@ test('finds the parent Compose root and creates a stable safe identity', () => {
   fs.mkdirSync(child, { recursive: true });
   fs.writeFileSync(path.join(root, 'compose.yaml'), 'services: {}\n');
   const project = createProject(child);
-  assert.equal(project.localRoot, root);
+  assert.equal(project.localRoot, fs.realpathSync(root));
   assert.match(project.id, /^docker-remote-test-[a-z0-9-]+-[a-f0-9]{12}$/);
   assert.equal(project.remoteCwd, `${project.remoteRoot}/services/api`);
 });
