@@ -27,6 +27,20 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(target_os = "macos")]
+const TRAY_ICON_TEMPLATE: Image<'static> =
+    tauri::include_image!("./icons/tray/tray-macos-template.png");
+
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON_IDLE: Image<'static> = tauri::include_image!("./icons/tray/tray-idle.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON_ACTIVE: Image<'static> = tauri::include_image!("./icons/tray/tray-active.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON_WARNING: Image<'static> =
+    tauri::include_image!("./icons/tray/tray-warning.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON_ERROR: Image<'static> = tauri::include_image!("./icons/tray/tray-error.png");
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Agent {
@@ -62,6 +76,14 @@ struct Snapshot {
     sessions: Vec<Session>,
     #[serde(skip)]
     error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrayState {
+    Idle,
+    Active,
+    Warning,
+    Error,
 }
 
 fn cli_path() -> PathBuf {
@@ -249,32 +271,35 @@ fn menu(app: &AppHandle, snapshot: &Snapshot) -> tauri::Result<Menu<Wry>> {
     Menu::with_items(app, &references)
 }
 
-fn icon() -> Image<'static> {
-    const SIZE: usize = 24;
-    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let index = (y * SIZE + x) * 4;
-            let dx = x as isize - 11;
-            let dy = y as isize - 11;
-            if dx * dx + dy * dy <= 112 {
-                rgba[index] = 34;
-                rgba[index + 1] = 139;
-                rgba[index + 2] = 230;
-                rgba[index + 3] = 255;
-            }
-            let is_link = (x >= 6 && x <= 17 && (y == 8 || y == 15))
-                || (y >= 8 && y <= 15 && (x == 6 || x == 17))
-                || (x >= 9 && x <= 14 && (y == 11 || y == 12));
-            if is_link {
-                rgba[index] = 255;
-                rgba[index + 1] = 255;
-                rgba[index + 2] = 255;
-                rgba[index + 3] = 255;
-            }
-        }
+fn tray_state(snapshot: &Snapshot) -> TrayState {
+    if snapshot.error.is_some() || !snapshot.agent.running {
+        TrayState::Error
+    } else if snapshot.sessions.is_empty() {
+        TrayState::Idle
+    } else if snapshot
+        .sessions
+        .iter()
+        .all(|session| session.status == "active")
+    {
+        TrayState::Active
+    } else {
+        TrayState::Warning
     }
-    Image::new_owned(rgba, SIZE as u32, SIZE as u32)
+}
+
+#[cfg(target_os = "macos")]
+fn tray_icon(_: TrayState) -> Image<'static> {
+    TRAY_ICON_TEMPLATE.clone()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tray_icon(state: TrayState) -> Image<'static> {
+    match state {
+        TrayState::Idle => TRAY_ICON_IDLE.clone(),
+        TrayState::Active => TRAY_ICON_ACTIVE.clone(),
+        TrayState::Warning => TRAY_ICON_WARNING.clone(),
+        TrayState::Error => TRAY_ICON_ERROR.clone(),
+    }
 }
 
 fn main() {
@@ -289,9 +314,10 @@ fn main() {
         .setup(move |app| {
             let _ = app.autolaunch().enable();
             let initial = snapshot();
+            let initial_state = tray_state(&initial);
             let initial_menu = menu(app.handle(), &initial)?;
             TrayIconBuilder::with_id("main")
-                .icon(icon())
+                .icon(tray_icon(initial_state))
                 .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("docker-remote port forwarding")
                 .menu(&initial_menu)
@@ -311,9 +337,13 @@ fn main() {
 
             let handle = app.handle().clone();
             let worker_refresh = Arc::clone(&refresh);
+            let mut previous_state = initial_state;
             thread::spawn(move || loop {
                 if worker_refresh.swap(false, Ordering::AcqRel) {
                     let current = snapshot();
+                    let current_state = tray_state(&current);
+                    let state_changed = current_state != previous_state;
+                    previous_state = current_state;
                     let active = current
                         .sessions
                         .iter()
@@ -324,6 +354,9 @@ fn main() {
                         if let Some(tray) = update_handle.tray_by_id("main") {
                             if let Ok(next_menu) = menu(&update_handle, &current) {
                                 let _ = tray.set_menu(Some(next_menu));
+                            }
+                            if state_changed {
+                                let _ = tray.set_icon(Some(tray_icon(current_state)));
                             }
                             let _ = tray.set_tooltip(Some(format!(
                                 "docker-remote · {active}/{} sessions active",
@@ -339,4 +372,102 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run docker-remote tray");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(status: &str) -> Session {
+        Session {
+            id: "test".to_string(),
+            label: "test".to_string(),
+            target: "test@example.com".to_string(),
+            status: status.to_string(),
+            restart_count: 0,
+            last_error: None,
+            forwards: Vec::new(),
+        }
+    }
+
+    fn snapshot(sessions: Vec<Session>) -> Snapshot {
+        Snapshot {
+            agent: Agent {
+                running: true,
+                pid: Some(42),
+            },
+            sessions,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn state_reflects_agent_and_session_health() {
+        assert_eq!(tray_state(&snapshot(Vec::new())), TrayState::Idle);
+        assert_eq!(
+            tray_state(&snapshot(vec![session("active")])),
+            TrayState::Active
+        );
+        assert_eq!(
+            tray_state(&snapshot(vec![session("reconnecting")])),
+            TrayState::Warning
+        );
+
+        let mut offline = snapshot(Vec::new());
+        offline.agent.running = false;
+        assert_eq!(tray_state(&offline), TrayState::Error);
+
+        let mut invalid = snapshot(Vec::new());
+        invalid.error = Some("invalid response".to_string());
+        assert_eq!(tray_state(&invalid), TrayState::Error);
+    }
+
+    fn assert_transparent_icon(icon: &Image<'_>, expected_size: u32) {
+        assert_eq!(icon.width(), expected_size);
+        assert_eq!(icon.height(), expected_size);
+        let alphas: Vec<u8> = icon.rgba().iter().skip(3).step_by(4).copied().collect();
+        assert!(alphas.contains(&0), "icon must have a transparent background");
+        assert!(alphas.iter().any(|alpha| *alpha > 0), "icon must be visible");
+    }
+
+    fn pixel(icon: &Image<'_>, x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * icon.width() + x) * 4) as usize;
+        icon.rgba()[index..index + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn tray_assets_have_platform_correct_size_and_transparency() {
+        #[cfg(target_os = "macos")]
+        {
+            let icon = tray_icon(TrayState::Idle);
+            assert_transparent_icon(&icon, 44);
+            assert!(
+                pixel(&icon, 13, 22)[3] < 16,
+                "left link must remain hollow"
+            );
+            assert!(
+                pixel(&icon, 31, 22)[3] < 16,
+                "right link must remain hollow"
+            );
+            assert!(pixel(&icon, 22, 22)[3] > 0, "link must remain connected");
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let states = [
+                TrayState::Idle,
+                TrayState::Active,
+                TrayState::Warning,
+                TrayState::Error,
+            ];
+            let mut colors = Vec::new();
+            for state in states {
+                let icon = tray_icon(state);
+                assert_transparent_icon(&icon, 32);
+                colors.push(pixel(&icon, 16, 5));
+            }
+            colors.dedup();
+            assert_eq!(colors.len(), states.len(), "health colors must be distinct");
+        }
+    }
 }
