@@ -17,7 +17,7 @@ use tauri::{
     image::Image,
     menu::{IsMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager, Wry,
+    AppHandle, Wry,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
